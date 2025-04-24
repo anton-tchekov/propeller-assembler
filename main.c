@@ -592,8 +592,8 @@ static void token_print(Token *t)
 	case T_MUL:       printf(" [*] ");            break;
 	case T_DIV:       printf(" [/] ");            break;
 	case T_MOD:       printf(" [%%] ");           break;
-	case T_SHL:       printf(" [>>] ");           break;
-	case T_SHR:       printf(" [<<] ");           break;
+	case T_SHL:       printf(" [<<] ");           break;
+	case T_SHR:       printf(" [>>] ");           break;
 	case T_INV:       printf(" [~] ");            break;
 	case T_AND:       printf(" [&] ");            break;
 	case T_OR:        printf(" [|] ");            break;
@@ -800,7 +800,7 @@ static i32 parse_expr(void)
 		else if(tt == T_LPAREN)
 		{
 			t_next();
-			parse_expr();
+			n_push(parse_expr());
 			t_expect(T_RPAREN);
 		}
 		else if((precedence = precedence_get(tt)) > 0)
@@ -842,6 +842,70 @@ static void token_prints(void)
 	printf("\n");
 }
 
+static u32 instr_modify_bit(u32 instr, i32 bit, i32 state)
+{
+	return state ? (instr | (1 << bit)) : (instr & ~(1 << bit));
+}
+
+static u32 instr_effects(u32 instr)
+{
+	i32 mask = 0;
+	i32 tt = tt_get(0);
+	if(tt == T_NULL)
+	{
+		return instr;
+	}
+
+	for(;;)
+	{
+		t_expect(T_EFFECT);
+
+		Token *t = t_get(0);
+		i32 v = t->Val;
+		i32 bit = 0;
+		i32 state = 0;
+
+		switch(v)
+		{
+		case E_NR:
+			bit = (1 << 23);
+			state = 0;
+			break;
+
+		case E_WR:
+			bit = (1 << 23);
+			state = 1;
+			break;
+
+		case E_WC:
+			bit = (1 << 24);
+			state = 1;
+			break;
+
+		case E_WZ:
+			bit = (1 << 25);
+			state = 1;
+			break;
+		}
+
+		if(mask & (1 << v))
+		{
+			report_error("Duplicate effect");
+		}
+
+		mask |= (1 << v);
+		instr = instr_modify_bit(instr, bit, state);
+		t_next();
+		if(tt_get(0) == T_NULL)
+		{
+			return instr;
+		}
+
+		t_expect(T_COMMA);
+		t_next();
+	}
+}
+
 static void instr_normal(u32 cond)
 {
 	u32 instr = t_get(0)->Val;
@@ -857,8 +921,7 @@ static void instr_normal(u32 cond)
 	}
 
 	i32 s = parse_expr();
-	t_expect(T_NULL);
-
+	instr = instr_effects(instr);
 	instr = instr_set_d(instr, d);
 	instr = instr_set_s(instr, s);
 	output_push_long(instr);
@@ -883,8 +946,7 @@ static void instr_jmp2(u32 cond)
 	}
 
 	i32 s = parse_expr();
-	t_expect(T_NULL);
-
+	instr = instr_effects(instr);
 	instr = instr_set_d(instr, d);
 	instr = instr_set_s(instr, s);
 	output_push_long(instr);
@@ -897,8 +959,8 @@ static void instr_hub(u32 cond)
 	t_next();
 	i32 s = parse_expr();
 	instr = instr_set_s(instr, s);
+	instr = instr_effects(instr);
 	output_push_long(instr);
-	t_expect(T_NULL);
 }
 
 static void instr_call(u32 cond)
@@ -911,7 +973,7 @@ static void instr_call(u32 cond)
 	t_expect(T_LABEL);
 	Token *t_label = t_get(0);
 	t_next();
-	t_expect(T_NULL);
+	instr = instr_effects(instr);
 
 	char buf[256];
 	int len = snprintf(buf, sizeof(buf), "%.*s_ret", t_label->Len, t_label->Ptr);
@@ -941,9 +1003,9 @@ static void instr_zero(u32 cond)
 {
 	u32 instr = t_get(0)->Val;
 	instr = instr_set_cond(instr, cond);
-	output_push_long(instr);
 	t_next();
-	t_expect(T_NULL);
+	instr = instr_effects(instr);
+	output_push_long(instr);
 }
 
 static void instr_jmp(u32 cond)
@@ -963,8 +1025,8 @@ static void instr_jmp(u32 cond)
 
 	i32 s = parse_expr();
 	instr = instr_set_s(instr, s);
+	instr = instr_effects(instr);
 	output_push_long(instr);
-	t_expect(T_NULL);
 }
 
 static i32 try_parse_instr(u32 cond)
@@ -1306,6 +1368,50 @@ static i32 try_parse_identifier(int type)
 	return 0;
 }
 
+static i32 parse_hex(void)
+{
+	i32 n = 0;
+	lexer_advance();
+	if(!is_hex(*input_ptr))
+	{
+		report_error("Expected hex digit");
+	}
+
+	while(is_hex(*input_ptr) || *input_ptr == '_')
+	{
+		if(*input_ptr != '_')
+		{
+			n = acc_hex(n, *input_ptr);
+		}
+
+		lexer_advance();
+	}
+
+	return n;
+}
+
+static i32 parse_bin(void)
+{
+	i32 n = 0;
+	lexer_advance();
+	if(!is_bin(*input_ptr))
+	{
+		report_error("Expected bin digit");
+	}
+
+	while(is_bin(*input_ptr) || *input_ptr == '_')
+	{
+		if(*input_ptr != '_')
+		{
+			n = acc_bin(n, *input_ptr);
+		}
+
+		lexer_advance();
+	}
+
+	return n;
+}
+
 static i32 try_parse_number(void)
 {
 	if(is_digit(*input_ptr))
@@ -1314,9 +1420,13 @@ static i32 try_parse_number(void)
 		lexer_advance();
 		if(n > 0)
 		{
-			while(is_digit(*input_ptr))
+			while(is_digit(*input_ptr) || *input_ptr == '_')
 			{
-				n = acc_dec(n, *input_ptr);
+				if(*input_ptr != '_')
+				{
+					n = acc_dec(n, *input_ptr);
+				}
+
 				lexer_advance();
 			}
 		}
@@ -1324,32 +1434,38 @@ static i32 try_parse_number(void)
 		{
 			if(is_x(*input_ptr))
 			{
-				lexer_advance();
-				while(is_hex(*input_ptr))
-				{
-					n = acc_hex(n, *input_ptr);
-					lexer_advance();
-				}
+				n = parse_hex();
 			}
 			else if(is_b(*input_ptr))
 			{
-				lexer_advance();
-				while(is_bin(*input_ptr))
-				{
-					n = acc_bin(n, *input_ptr);
-					lexer_advance();
-				}
+				n = parse_bin();
 			}
 			else
 			{
-				while(is_oct(*input_ptr))
+				while(is_oct(*input_ptr) || *input_ptr == '_')
 				{
-					n = acc_oct(n, *input_ptr);
+					if(*input_ptr != '_')
+					{
+						n = acc_oct(n, *input_ptr);
+					}
+
 					lexer_advance();
 				}
 			}
 		}
 
+		token_add(T_NUMBER, NULL, 0, n);
+		return 1;
+	}
+	else if(*input_ptr == '$')
+	{
+		i32 n = parse_hex();
+		token_add(T_NUMBER, NULL, 0, n);
+		return 1;
+	}
+	else if(*input_ptr == '%')
+	{
+		i32 n = parse_bin();
 		token_add(T_NUMBER, NULL, 0, n);
 		return 1;
 	}
@@ -1409,7 +1525,7 @@ static i32 try_parse_string(void)
 
 static void parse_input(void)
 {
-	lnr = 1;
+	lnr = 0;
 	input_ptr = input;
 	while(input_ptr < input_end)
 	{
